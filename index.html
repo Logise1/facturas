@@ -75,17 +75,27 @@
             const [userProfile, setUserProfile] = useState(null);
             const [isGapiLoaded, setIsGapiLoaded] = useState(false);
 
-            // Estados de Filtros Avanzados
+            // Estados de Filtros Avanzados (Con persistencia en LocalStorage)
             const [showFilters, setShowFilters] = useState(false);
-            const [filters, setFilters] = useState({
-                mainQuery: 'Factura', // Búsqueda general por defecto
-                subject: '',          // Debe estar en asunto
-                from: '',             // Remitente específico (inclusión)
-                excludeFrom: '',      // Remitente a EXCLUIR (nuevo)
-                exclude: '',          // Palabras para EXCLUIR
-                dateFrom: '',
-                dateTo: ''
+            
+            // INICIALIZACIÓN CON LOCALSTORAGE
+            const [filters, setFilters] = useState(() => {
+                const savedFilters = localStorage.getItem('invoiceFilters');
+                return savedFilters ? JSON.parse(savedFilters) : {
+                    mainQuery: 'Factura', 
+                    subject: '',          
+                    from: '',             
+                    excludeFrom: '',      
+                    exclude: '',          
+                    dateFrom: '',
+                    dateTo: ''
+                };
             });
+
+            // GUARDADO AUTOMÁTICO EN LOCALSTORAGE
+            useEffect(() => {
+                localStorage.setItem('invoiceFilters', JSON.stringify(filters));
+            }, [filters]);
 
             // Estados de la Aplicación
             const [emails, setEmails] = useState([]);
@@ -161,44 +171,41 @@
 
                 try {
                     // --- CONSTRUCCIÓN DE LA QUERY DE GMAIL ---
-                    // Documentación: https://support.google.com/mail/answer/7190
+                    let queryParts = ['has:attachment'];
                     
-                    let queryParts = ['has:attachment']; // Base: solo correos con adjuntos
-                    
-                    // 1. Palabra clave principal (ej: "Factura")
                     if (filters.mainQuery.trim()) {
                         queryParts.push(`"${filters.mainQuery.trim()}"`);
                     }
                     
-                    // 2. Asunto específico
                     if (filters.subject.trim()) {
                         queryParts.push(`subject:(${filters.subject.trim()})`);
                     }
                     
-                    // 3. Remitente específico (INCLUSIÓN)
                     if (filters.from.trim()) {
                         queryParts.push(`from:(${filters.from.trim()})`);
                     }
 
-                    // 4. Remitente específico (EXCLUSIÓN - NUEVO)
-                    // Usa el operador -from:
+                    // LÓGICA DE EXCLUSIÓN MÚLTIPLE (Separada por comas)
                     if (filters.excludeFrom.trim()) {
-                         queryParts.push(`-from:(${filters.excludeFrom.trim()})`);
+                        const excludedEmails = filters.excludeFrom.split(',');
+                        excludedEmails.forEach(email => {
+                            if (email.trim()) {
+                                // Añadimos una cláusula negativa por cada email
+                                queryParts.push(`-from:(${email.trim()})`);
+                            }
+                        });
                     }
                     
-                    // 5. EXCLUSIONES de palabras (signo menos delante)
-                    // Ej: -Publicidad -Newsletter
                     if (filters.exclude.trim()) {
                         const exclusions = filters.exclude.trim().split(' ').map(word => `-${word}`).join(' ');
                         queryParts.push(exclusions);
                     }
 
-                    // 6. Fechas
                     if (filters.dateFrom) queryParts.push(`after:${filters.dateFrom.replaceAll('-', '/')}`);
                     if (filters.dateTo) queryParts.push(`before:${filters.dateTo.replaceAll('-', '/')}`);
 
                     const finalQuery = queryParts.join(' ');
-                    console.log("Query enviada a Gmail:", finalQuery); // Para depuración
+                    console.log("Query enviada a Gmail:", finalQuery); 
 
                     const response = await window.gapi.client.gmail.users.messages.list({
                         'userId': 'me',
@@ -218,7 +225,6 @@
 
                     const processedEmails = [];
 
-                    // Procesamiento de mensajes
                     for (const msg of messages) {
                         try {
                             const details = await window.gapi.client.gmail.users.messages.get({
@@ -236,7 +242,6 @@
                             const dateObj = new Date(dateHeader);
                             const dateStr = dateObj.toLocaleDateString('es-ES');
 
-                            // Buscar adjuntos recursivamente
                             const attachments = [];
                             const findAttachments = (parts) => {
                                 if (!parts) return;
@@ -263,7 +268,7 @@
                                     subject,
                                     from,
                                     date: dateStr,
-                                    rawDate: dateObj, // Importante para ordenar antes de renombrar
+                                    rawDate: dateObj, 
                                     attachments
                                 });
                             }
@@ -283,7 +288,6 @@
                 }
             }, [accessToken, filters]);
 
-            // Efecto de carga inicial
             useEffect(() => {
                 if (accessToken && !initialLoadDone) {
                     setInitialLoadDone(true);
@@ -291,7 +295,6 @@
                 }
             }, [accessToken, initialLoadDone, searchEmails]);
 
-            // Descarga individual
             const downloadAttachment = async (messageId, attachmentId, filename) => {
                 try {
                     const response = await window.gapi.client.gmail.users.messages.attachments.get({
@@ -317,7 +320,6 @@
                 setSelectedEmails(all ? {} : emails.reduce((acc, e) => ({...acc, [e.id]: true}), {}));
             };
 
-            // --- LÓGICA DE RENOMBRADO INTELIGENTE (ZIP) ---
             const downloadSelectedAsZip = async () => {
                 const idsToDownload = Object.keys(selectedEmails).filter(id => selectedEmails[id]);
                 if (idsToDownload.length === 0) return;
@@ -327,30 +329,23 @@
                 
                 const zip = new JSZip();
                 
-                // Mapa para llevar la cuenta: { "Endesa": 2, "Amazon": 5, "Flat": 1 }
                 const senderCounters = {};
 
                 try {
-                    // 1. Ordenamos por fecha (del más antiguo al más nuevo) para que la numeración sea lógica
-                    // "Flat1.pdf" será la factura de enero, "Flat2.pdf" la de febrero, etc.
                     const sortedEmails = emails
                         .filter(e => selectedEmails[e.id])
                         .sort((a, b) => a.rawDate - b.rawDate);
 
                     for (const email of sortedEmails) {
-                        // Limpieza del nombre del remitente
-                        // De: "Google Cloud <noreply@google.com>" -> "GoogleCloud"
-                        // De: "Flat.io Payments" -> "FlatioPayments"
                         let cleanSender = email.from.split('<')[0].trim();
-                        cleanSender = cleanSender.replace(/[^a-zA-Z0-9áéíóúÁÉÍÓÚñÑ]/g, ''); // Solo letras y números
+                        cleanSender = cleanSender.replace(/[^a-zA-Z0-9áéíóúÁÉÍÓÚñÑ]/g, ''); 
                         
                         if (cleanSender.length === 0) cleanSender = "RemitenteDesconocido";
 
-                        // Si es la primera vez que vemos este remitente, inicializamos a 0
                         if (!senderCounters[cleanSender]) senderCounters[cleanSender] = 0;
                         
                         for (const att of email.attachments) {
-                            senderCounters[cleanSender]++; // Incrementamos contador
+                            senderCounters[cleanSender]++; 
                             const counter = senderCounters[cleanSender];
 
                             const response = await window.gapi.client.gmail.users.messages.attachments.get({
@@ -359,16 +354,12 @@
                                 'id': att.id
                             });
 
-                            // Obtener extensión original del archivo (pdf, jpg, zip...)
                             const extension = att.filename.split('.').pop();
                             
-                            // NUEVO NOMBRE DE ARCHIVO: Remitente + Numero + .Extension
-                            // Ejemplo: Flat1.pdf
                             const newFilename = `${cleanSender}${counter}.${extension}`;
 
                             const dataBase64Rep = response.result.data.replace(/-/g, '+').replace(/_/g, '/');
                             
-                            // Añadimos al ZIP con el nuevo nombre
                             zip.file(newFilename, dataBase64Rep, {base64: true});
                         }
                     }
@@ -402,7 +393,7 @@
                                 <Icon name="LogIn" size={20} />
                                 Iniciar Sesión con Google
                             </button>
-                            <p className="mt-4 text-xs text-gray-400">Versión segura v2.1</p>
+                            <p className="mt-4 text-xs text-gray-400">Versión segura v2.2</p>
                         </div>
                     </div>
                 );
@@ -424,7 +415,10 @@
                             </div>
                         </div>
                         <button 
-                            onClick={() => window.location.reload()}
+                            onClick={() => {
+                                // Limpieza opcional al salir, aunque localStorage persiste
+                                window.location.reload(); 
+                            }}
                             className="text-gray-500 hover:text-red-600 text-sm font-medium px-3 py-1 rounded hover:bg-red-50 transition"
                         >
                             Cerrar Sesión
@@ -530,10 +524,10 @@
                                             type="text" 
                                             value={filters.excludeFrom}
                                             onChange={(e) => handleFilterChange('excludeFrom', e.target.value)}
-                                            placeholder="Ej: no-reply@spam.com"
+                                            placeholder="Ej: spam@x.com, newsletter@y.com"
                                             className="w-full p-2 text-sm border border-red-200 rounded focus:ring-1 focus:ring-red-500 outline-none bg-red-50"
                                         />
-                                        <p className="text-xs text-gray-400 mt-1">Escribe la dirección de correo exacta.</p>
+                                        <p className="text-xs text-gray-400 mt-1">Separa varias direcciones con comas.</p>
                                     </div>
                                 </div>
                             </div>
