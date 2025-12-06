@@ -80,7 +80,8 @@
             const [filters, setFilters] = useState({
                 mainQuery: 'Factura', // Búsqueda general por defecto
                 subject: '',          // Debe estar en asunto
-                from: '',             // Remitente específico
+                from: '',             // Remitente específico (inclusión)
+                excludeFrom: '',      // Remitente a EXCLUIR (nuevo)
                 exclude: '',          // Palabras para EXCLUIR
                 dateFrom: '',
                 dateTo: ''
@@ -174,19 +175,25 @@
                         queryParts.push(`subject:(${filters.subject.trim()})`);
                     }
                     
-                    // 3. Remitente específico
+                    // 3. Remitente específico (INCLUSIÓN)
                     if (filters.from.trim()) {
                         queryParts.push(`from:(${filters.from.trim()})`);
                     }
+
+                    // 4. Remitente específico (EXCLUSIÓN - NUEVO)
+                    // Usa el operador -from:
+                    if (filters.excludeFrom.trim()) {
+                         queryParts.push(`-from:(${filters.excludeFrom.trim()})`);
+                    }
                     
-                    // 4. EXCLUSIONES (La parte clave: signo menos delante)
+                    // 5. EXCLUSIONES de palabras (signo menos delante)
                     // Ej: -Publicidad -Newsletter
                     if (filters.exclude.trim()) {
                         const exclusions = filters.exclude.trim().split(' ').map(word => `-${word}`).join(' ');
                         queryParts.push(exclusions);
                     }
 
-                    // 5. Fechas
+                    // 6. Fechas
                     if (filters.dateFrom) queryParts.push(`after:${filters.dateFrom.replaceAll('-', '/')}`);
                     if (filters.dateTo) queryParts.push(`before:${filters.dateTo.replaceAll('-', '/')}`);
 
@@ -395,7 +402,7 @@
                                 <Icon name="LogIn" size={20} />
                                 Iniciar Sesión con Google
                             </button>
-                            <p className="mt-4 text-xs text-gray-400">Versión segura v2.0</p>
+                            <p className="mt-4 text-xs text-gray-400">Versión segura v2.1</p>
                         </div>
                     </div>
                 );
@@ -472,7 +479,7 @@
 
                         {/* PANEL DE FILTROS AVANZADOS (Desplegable) */}
                         <div className={`filter-panel ${showFilters ? 'open' : ''}`}>
-                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                                 <div>
                                     <label className="block text-xs font-semibold text-gray-500 uppercase mb-1">Contiene las palabras</label>
                                     <input 
@@ -485,15 +492,14 @@
                                     <p className="text-xs text-gray-400 mt-1">Busca en asunto y cuerpo.</p>
                                 </div>
                                 <div>
-                                    <label className="block text-xs font-semibold text-red-500 uppercase mb-1">Excluir palabras (NO contiene)</label>
+                                    <label className="block text-xs font-semibold text-gray-500 uppercase mb-1">Asunto contiene</label>
                                     <input 
                                         type="text" 
-                                        value={filters.exclude}
-                                        onChange={(e) => handleFilterChange('exclude', e.target.value)}
-                                        placeholder="Ej: Publicidad Presupuesto Spam"
-                                        className="w-full p-2 text-sm border border-red-200 rounded focus:ring-1 focus:ring-red-500 outline-none bg-red-50"
+                                        value={filters.subject}
+                                        onChange={(e) => handleFilterChange('subject', e.target.value)}
+                                        placeholder="Ej: NumPedido, Order"
+                                        className="w-full p-2 text-sm border border-gray-300 rounded focus:ring-1 focus:ring-blue-500 outline-none"
                                     />
-                                    <p className="text-xs text-gray-400 mt-1">Útil para quitar correos no deseados.</p>
                                 </div>
                                 <div>
                                     <label className="block text-xs font-semibold text-gray-500 uppercase mb-1">Remitente (De:)</label>
@@ -505,15 +511,30 @@
                                         className="w-full p-2 text-sm border border-gray-300 rounded focus:ring-1 focus:ring-blue-500 outline-none"
                                     />
                                 </div>
-                                <div>
-                                    <label className="block text-xs font-semibold text-gray-500 uppercase mb-1">Asunto contiene</label>
-                                    <input 
-                                        type="text" 
-                                        value={filters.subject}
-                                        onChange={(e) => handleFilterChange('subject', e.target.value)}
-                                        placeholder="Ej: NumPedido, Order"
-                                        className="w-full p-2 text-sm border border-gray-300 rounded focus:ring-1 focus:ring-blue-500 outline-none"
-                                    />
+                                
+                                <div className="md:col-span-3 border-t border-gray-100 mt-2 pt-4 grid grid-cols-1 md:grid-cols-2 gap-4">
+                                    <div>
+                                        <label className="block text-xs font-semibold text-red-500 uppercase mb-1">Excluir palabras (NO contiene)</label>
+                                        <input 
+                                            type="text" 
+                                            value={filters.exclude}
+                                            onChange={(e) => handleFilterChange('exclude', e.target.value)}
+                                            placeholder="Ej: Publicidad Presupuesto Spam"
+                                            className="w-full p-2 text-sm border border-red-200 rounded focus:ring-1 focus:ring-red-500 outline-none bg-red-50"
+                                        />
+                                        <p className="text-xs text-gray-400 mt-1">Separa palabras con espacios.</p>
+                                    </div>
+                                    <div>
+                                        <label className="block text-xs font-semibold text-red-500 uppercase mb-1">Excluir Remitente (NO de:)</label>
+                                        <input 
+                                            type="text" 
+                                            value={filters.excludeFrom}
+                                            onChange={(e) => handleFilterChange('excludeFrom', e.target.value)}
+                                            placeholder="Ej: no-reply@spam.com"
+                                            className="w-full p-2 text-sm border border-red-200 rounded focus:ring-1 focus:ring-red-500 outline-none bg-red-50"
+                                        />
+                                        <p className="text-xs text-gray-400 mt-1">Escribe la dirección de correo exacta.</p>
+                                    </div>
                                 </div>
                             </div>
                         </div>
