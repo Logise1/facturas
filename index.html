@@ -43,7 +43,7 @@
     <div id="root"></div>
 
     <script type="text/babel">
-        const { useState, useEffect, useRef } = React;
+        const { useState, useEffect, useCallback } = React;
 
         // Componente de Icono
         const Icon = ({ name, size = 20, className = "" }) => {
@@ -53,7 +53,6 @@
 
         function App() {
             // Estados de Configuración y Auth
-            // ID CONFIGURADO DE FONDO (HARDCODED)
             const CLIENT_ID_CONFIG = '81621005272-3g1kkuk30dvgsmjk44ug02001mk6usm1.apps.googleusercontent.com';
             
             const [tokenClient, setTokenClient] = useState(null);
@@ -68,6 +67,7 @@
             const [loading, setLoading] = useState(false);
             const [statusMsg, setStatusMsg] = useState('');
             const [selectedEmails, setSelectedEmails] = useState({});
+            const [initialLoadDone, setInitialLoadDone] = useState(false);
 
             // Inicializar Google API
             useEffect(() => {
@@ -80,12 +80,9 @@
                     });
                 };
 
-                // Cargar script de gapi si no está cargado
                 if (window.gapi) {
                     initGapi();
                 }
-
-                // Cargar iconos
                 if (window.lucide) window.lucide.createIcons();
             }, []);
 
@@ -97,7 +94,8 @@
             const initTokenClient = () => {
                 const client = google.accounts.oauth2.initTokenClient({
                     client_id: CLIENT_ID_CONFIG,
-                    scope: 'https://www.googleapis.com/auth/gmail.readonly',
+                    // AÑADIDO: https://www.googleapis.com/auth/userinfo.profile para leer el nombre
+                    scope: 'https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/userinfo.profile',
                     callback: (tokenResponse) => {
                         if (tokenResponse && tokenResponse.access_token) {
                             setAccessToken(tokenResponse.access_token);
@@ -122,16 +120,16 @@
             };
 
             // Función Principal: Buscar Correos
-            const searchEmails = async () => {
+            // Usamos useCallback para poder usarla en el useEffect
+            const searchEmails = useCallback(async (isAutoLoad = false) => {
                 if (!accessToken) return;
                 setLoading(true);
                 setEmails([]);
                 setSelectedEmails({});
-                setStatusMsg('Buscando correos con "Factura"...');
+                setStatusMsg(isAutoLoad ? 'Cargando todas las facturas de la historia...' : 'Buscando facturas...');
 
                 try {
                     // Construir query de Gmail
-                    // q=Factura has:attachment after:YYYY/MM/DD before:YYYY/MM/DD
                     let query = 'Factura has:attachment';
                     if (dateFrom) query += ` after:${dateFrom.replaceAll('-', '/')}`;
                     if (dateTo) query += ` before:${dateTo.replaceAll('-', '/')}`;
@@ -139,72 +137,97 @@
                     const response = await window.gapi.client.gmail.users.messages.list({
                         'userId': 'me',
                         'q': query,
-                        'maxResults': 30 // Límite para demo, aumentar si es necesario
+                        'maxResults': 100 // AUMENTADO A 100 para traer más resultados iniciales
                     });
 
                     const messages = response.result.messages || [];
-                    setStatusMsg(`Se encontraron ${messages.length} correos. Procesando detalles...`);
+                    
+                    if (messages.length === 0) {
+                         setStatusMsg('No se encontraron facturas.');
+                         setLoading(false);
+                         return;
+                    }
+
+                    setStatusMsg(`Analizando ${messages.length} correos encontrados...`);
 
                     const processedEmails = [];
 
-                    // Procesar detalles de cada correo (esto puede tardar)
+                    // Procesar detalles de cada correo
+                    // Nota: Hacemos peticiones en paralelo por lotes pequeños para no saturar, pero simple por ahora
                     for (const msg of messages) {
-                        const details = await window.gapi.client.gmail.users.messages.get({
-                            'userId': 'me',
-                            'id': msg.id
-                        });
-
-                        const payload = details.result.payload;
-                        const headers = payload.headers;
-                        
-                        const subject = headers.find(h => h.name === 'Subject')?.value || '(Sin Asunto)';
-                        const from = headers.find(h => h.name === 'From')?.value || 'Desconocido';
-                        const date = headers.find(h => h.name === 'Date')?.value;
-
-                        // Encontrar adjuntos
-                        const attachments = [];
-                        
-                        // Función recursiva para buscar adjuntos en las partes MIME
-                        const findAttachments = (parts) => {
-                            if (!parts) return;
-                            parts.forEach(part => {
-                                if (part.filename && part.filename.length > 0 && part.body && part.body.attachmentId) {
-                                    attachments.push({
-                                        id: part.body.attachmentId,
-                                        filename: part.filename,
-                                        mimeType: part.mimeType,
-                                        size: part.body.size,
-                                        messageId: msg.id // Necesario para descargar después
-                                    });
-                                }
-                                if (part.parts) findAttachments(part.parts);
+                        try {
+                            const details = await window.gapi.client.gmail.users.messages.get({
+                                'userId': 'me',
+                                'id': msg.id
                             });
-                        };
-                        
-                        findAttachments(payload.parts);
 
-                        if (attachments.length > 0) {
-                            processedEmails.push({
-                                id: msg.id,
-                                threadId: msg.threadId,
-                                subject,
-                                from,
-                                date: new Date(date).toLocaleDateString('es-ES'),
-                                attachments
-                            });
+                            const payload = details.result.payload;
+                            const headers = payload.headers;
+                            
+                            const subject = headers.find(h => h.name === 'Subject')?.value || '(Sin Asunto)';
+                            const from = headers.find(h => h.name === 'From')?.value || 'Desconocido';
+                            const dateHeader = headers.find(h => h.name === 'Date')?.value;
+                            
+                            // Parsear fecha para ordenamiento
+                            const dateObj = new Date(dateHeader);
+                            const dateStr = dateObj.toLocaleDateString('es-ES');
+
+                            // Encontrar adjuntos
+                            const attachments = [];
+                            
+                            const findAttachments = (parts) => {
+                                if (!parts) return;
+                                parts.forEach(part => {
+                                    if (part.filename && part.filename.length > 0 && part.body && part.body.attachmentId) {
+                                        attachments.push({
+                                            id: part.body.attachmentId,
+                                            filename: part.filename,
+                                            mimeType: part.mimeType,
+                                            size: part.body.size,
+                                            messageId: msg.id
+                                        });
+                                    }
+                                    if (part.parts) findAttachments(part.parts);
+                                });
+                            };
+                            
+                            findAttachments(payload.parts);
+
+                            if (attachments.length > 0) {
+                                processedEmails.push({
+                                    id: msg.id,
+                                    threadId: msg.threadId,
+                                    subject,
+                                    from,
+                                    date: dateStr,
+                                    rawDate: dateObj, // Para ordenar si fuera necesario
+                                    attachments
+                                });
+                            }
+                        } catch (err) {
+                            console.warn("Error procesando mensaje individual", err);
                         }
                     }
 
                     setEmails(processedEmails);
-                    setStatusMsg(`Proceso completado. ${processedEmails.length} correos con facturas válidas.`);
+                    setStatusMsg(`Listo. ${processedEmails.length} correos con facturas.`);
 
                 } catch (error) {
                     console.error(error);
-                    setStatusMsg('Error al buscar correos: ' + error.message);
+                    setStatusMsg('Error al buscar: ' + error.message);
                 } finally {
                     setLoading(false);
                 }
-            };
+            }, [accessToken, dateFrom, dateTo]);
+
+            // EFECTO DE AUTO-CARGA: Se ejecuta cuando cambia el accessToken (Login exitoso)
+            useEffect(() => {
+                if (accessToken && !initialLoadDone) {
+                    setInitialLoadDone(true);
+                    searchEmails(true); // true indica que es carga automática
+                }
+            }, [accessToken, initialLoadDone, searchEmails]);
+
 
             // Descargar un solo adjunto
             const downloadAttachment = async (messageId, attachmentId, filename) => {
@@ -231,12 +254,8 @@
                 }
             };
 
-            // Manejar selección de checkboxes
             const toggleSelectEmail = (id) => {
-                setSelectedEmails(prev => ({
-                    ...prev,
-                    [id]: !prev[id]
-                }));
+                setSelectedEmails(prev => ({ ...prev, [id]: !prev[id] }));
             };
 
             const toggleSelectAll = () => {
@@ -250,13 +269,12 @@
                 }
             };
 
-            // Descargar masiva (ZIP)
             const downloadSelectedAsZip = async () => {
                 const idsToDownload = Object.keys(selectedEmails).filter(id => selectedEmails[id]);
                 if (idsToDownload.length === 0) return;
 
                 setLoading(true);
-                setStatusMsg(`Generando ZIP de ${idsToDownload.length} correos...`);
+                setStatusMsg(`Preparando ZIP de ${idsToDownload.length} correos...`);
                 
                 const zip = new JSZip();
 
@@ -265,8 +283,6 @@
                         const email = emails.find(e => e.id === msgId);
                         if (!email) continue;
 
-                        // Crear carpeta para el email o prefijar archivos
-                        // Vamos a prefijar con el asunto para que sea fácil identificar
                         const safeSubject = email.subject.replace(/[^a-z0-9]/gi, '_').substring(0, 30);
                         
                         for (const att of email.attachments) {
@@ -277,23 +293,23 @@
                             });
 
                             const dataBase64Rep = response.result.data.replace(/-/g, '+').replace(/_/g, '/');
-                            zip.file(`${email.date}_${safeSubject}_${att.filename}`, dataBase64Rep, {base64: true});
+                            zip.file(`${email.date.replaceAll('/','-')}_${safeSubject}_${att.filename}`, dataBase64Rep, {base64: true});
                         }
                     }
 
-                    setStatusMsg("Comprimiendo archivos...");
+                    setStatusMsg("Comprimiendo...");
                     const content = await zip.generateAsync({type:"blob"});
                     saveAs(content, "facturas_gmail.zip");
                     setStatusMsg("Descarga completada.");
 
                 } catch (error) {
-                    setStatusMsg("Error generando ZIP: " + error.message);
+                    setStatusMsg("Error en ZIP: " + error.message);
                 } finally {
                     setLoading(false);
                 }
             };
 
-            // Pantalla de Login
+            // LOGIN UI
             if (!accessToken) {
                 return (
                     <div className="min-h-screen flex items-center justify-center p-4 bg-gradient-to-br from-blue-50 to-indigo-100">
@@ -303,32 +319,24 @@
                             </div>
                             <h1 className="text-2xl font-bold text-gray-800 mb-2">Mis Facturas</h1>
                             <p className="text-gray-500 mb-8 text-sm">
-                                Gestiona y descarga tus facturas de Gmail de forma rápida y segura.
+                                Gestiona y descarga tus facturas de Gmail.
                             </p>
                             
                             <button 
                                 onClick={initTokenClient}
                                 disabled={!isGapiLoaded}
-                                className="w-full bg-blue-600 hover:bg-blue-700 text-white py-3 px-4 rounded-xl font-medium transition shadow-md hover:shadow-lg disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-3 transform hover:-translate-y-0.5"
+                                className="w-full bg-blue-600 hover:bg-blue-700 text-white py-3 px-4 rounded-xl font-medium transition shadow-md hover:shadow-lg disabled:opacity-50 flex items-center justify-center gap-3"
                             >
-                                <svg className="w-5 h-5" viewBox="0 0 24 24">
-                                    <path fill="currentColor" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" />
-                                    <path fill="currentColor" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" />
-                                    <path fill="currentColor" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.84z" />
-                                    <path fill="currentColor" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" />
-                                </svg>
+                                <Icon name="LogIn" size={20} />
                                 Iniciar Sesión con Google
                             </button>
-                            
-                            <p className="mt-6 text-xs text-gray-400">
-                                Tus datos se procesan de forma local en tu navegador.
-                            </p>
+                            <p className="mt-4 text-xs text-gray-400">Versión segura v1.2</p>
                         </div>
                     </div>
                 );
             }
 
-            // Pantalla Principal
+            // MAIN UI
             return (
                 <div className="min-h-screen p-4 md:p-8 max-w-6xl mx-auto">
                     {/* Header */}
@@ -339,8 +347,8 @@
                             </div>
                             <div>
                                 <h1 className="text-xl font-bold text-gray-800">Mis Facturas</h1>
-                                <p className="text-xs text-gray-500">
-                                    {userProfile ? `Hola, ${userProfile.name}` : 'Conectado'}
+                                <p className="text-xs text-gray-500 font-medium">
+                                    {userProfile && userProfile.name ? `Hola, ${userProfile.name}` : 'Hola, Usuario'}
                                 </p>
                             </div>
                         </div>
@@ -354,7 +362,7 @@
 
                     {/* Controles de Búsqueda */}
                     <div className="bg-white p-6 rounded-lg shadow-sm mb-6 border border-gray-100">
-                        <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-4">Filtros de Búsqueda</h2>
+                        <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-4">Filtros (Opcional)</h2>
                         <div className="grid grid-cols-1 md:grid-cols-4 gap-4 items-end">
                             <div>
                                 <label className="block text-sm font-medium text-gray-700 mb-1">Desde</label>
@@ -362,7 +370,7 @@
                                     type="date" 
                                     value={dateFrom} 
                                     onChange={(e) => setDateFrom(e.target.value)}
-                                    className="w-full p-2.5 bg-gray-50 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition"
+                                    className="w-full p-2.5 bg-gray-50 border border-gray-200 rounded-lg outline-none focus:border-blue-500"
                                 />
                             </div>
                             <div>
@@ -371,17 +379,17 @@
                                     type="date" 
                                     value={dateTo} 
                                     onChange={(e) => setDateTo(e.target.value)}
-                                    className="w-full p-2.5 bg-gray-50 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition"
+                                    className="w-full p-2.5 bg-gray-50 border border-gray-200 rounded-lg outline-none focus:border-blue-500"
                                 />
                             </div>
                             <div className="md:col-span-2">
                                 <button 
-                                    onClick={searchEmails}
+                                    onClick={() => searchEmails(false)}
                                     disabled={loading}
-                                    className="w-full bg-blue-600 text-white py-2.5 px-4 rounded-lg hover:bg-blue-700 active:bg-blue-800 transition flex justify-center items-center gap-2 font-medium shadow-sm"
+                                    className="w-full bg-blue-600 text-white py-2.5 px-4 rounded-lg hover:bg-blue-700 transition flex justify-center items-center gap-2 font-medium"
                                 >
                                     {loading ? <div className="loader"></div> : <Icon name="Search" size={18} />}
-                                    {loading ? 'Buscando facturas...' : 'Buscar Facturas'}
+                                    {loading ? 'Procesando...' : 'Aplicar Filtros'}
                                 </button>
                             </div>
                         </div>
@@ -396,17 +404,16 @@
                     {/* Lista de Resultados */}
                     {emails.length > 0 && (
                         <div className="bg-white rounded-lg shadow-sm overflow-hidden border border-gray-100">
-                            {/* Barra de herramientas de tabla */}
                             <div className="p-4 border-b border-gray-100 flex flex-wrap justify-between items-center bg-gray-50 gap-4">
                                 <div className="flex items-center gap-3">
-                                    <div className="flex items-center gap-2 bg-white px-3 py-1.5 rounded border border-gray-200 shadow-sm cursor-pointer hover:bg-gray-50" onClick={toggleSelectAll}>
+                                    <div className="flex items-center gap-2 bg-white px-3 py-1.5 rounded border border-gray-200 cursor-pointer hover:bg-gray-50" onClick={toggleSelectAll}>
                                         <input 
                                             type="checkbox" 
                                             checked={Object.keys(selectedEmails).length === emails.length}
                                             readOnly
                                             className="w-4 h-4 text-blue-600 rounded cursor-pointer"
                                         />
-                                        <span className="text-sm font-medium text-gray-700 select-none">Seleccionar todo</span>
+                                        <span className="text-sm font-medium text-gray-700 select-none">Todos</span>
                                     </div>
                                     <span className="text-xs text-gray-500 hidden sm:inline">
                                         {Object.values(selectedEmails).filter(Boolean).length} seleccionados
@@ -415,7 +422,7 @@
                                 <button 
                                     onClick={downloadSelectedAsZip}
                                     disabled={loading || Object.values(selectedEmails).filter(Boolean).length === 0}
-                                    className="bg-green-600 text-white text-sm py-2 px-4 rounded-lg hover:bg-green-700 transition flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed shadow-sm font-medium"
+                                    className="bg-green-600 text-white text-sm py-2 px-4 rounded-lg hover:bg-green-700 transition flex items-center gap-2 disabled:opacity-50 font-medium"
                                 >
                                     <Icon name="Archive" size={16} />
                                     Descargar ZIP
@@ -430,7 +437,7 @@
                                             <th className="p-4">Fecha</th>
                                             <th className="p-4">Remitente</th>
                                             <th className="p-4">Asunto</th>
-                                            <th className="p-4">Facturas encontradas</th>
+                                            <th className="p-4">Facturas</th>
                                         </tr>
                                     </thead>
                                     <tbody className="divide-y divide-gray-50">
@@ -458,11 +465,10 @@
                                                                 key={idx}
                                                                 onClick={() => downloadAttachment(email.id, att.id, att.filename)}
                                                                 className="flex items-center gap-2 text-xs bg-white hover:bg-blue-600 hover:text-white text-gray-700 py-1.5 px-3 rounded-full border border-gray-200 hover:border-blue-600 transition shadow-sm group"
-                                                                title="Clic para descargar"
                                                             >
                                                                 <Icon name="File" size={12} className="text-gray-400 group-hover:text-white" />
                                                                 <span className="truncate max-w-[120px]">{att.filename}</span>
-                                                                <Icon name="Download" size={12} className="opacity-0 group-hover:opacity-100 transition-opacity" />
+                                                                <Icon name="Download" size={12} className="opacity-0 group-hover:opacity-100" />
                                                             </button>
                                                         ))}
                                                     </div>
@@ -480,8 +486,8 @@
                             <div className="bg-gray-100 rounded-full w-20 h-20 flex items-center justify-center mx-auto mb-4">
                                 <Icon name="Inbox" size={32} className="text-gray-400" />
                             </div>
-                            <h3 className="text-gray-900 font-medium mb-1">Sin resultados</h3>
-                            <p className="text-gray-500 text-sm">Ajusta las fechas o espera a recibir nuevas facturas.</p>
+                            <h3 className="text-gray-900 font-medium mb-1">Sin facturas recientes</h3>
+                            <p className="text-gray-500 text-sm">Prueba ampliando el rango de fechas.</p>
                         </div>
                     )}
                 </div>
